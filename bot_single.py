@@ -3,7 +3,7 @@
 #  Cài thư viện: pip install aiogram==3.13.1 sqlalchemy==2.0.36 aiosqlite==0.20.0 aiofiles==24.1.0 aiohttp
 # ═══════════════════════════════════════════════════════════════
 
-BOT_TOKEN = ""  
+BOT_TOKEN = "8374524579:AAF6CpmmHi0RKYtQ5dJ0bIw9e_wBonjF1nY"  
 ADMIN_IDS = [7936179657]  # ID Telegram Admin
 
 import asyncio
@@ -56,9 +56,9 @@ from sqlalchemy.orm import (
 
 # ── Cấu hình Shop & Tài Xỉu ───────────────────────────────────────────────────
 ACCOUNT_PRICE = 300  # VNĐ mỗi acc
-MIN_ORDER_QTY = 1  # Số lượng tối thiểu
+MIN_ORDER_QTY = 10  # Số lượng tối thiểu
 CHECKER_LINK = "t.me/tretrauchecker_bot?start=_tgr_8UulJtkyZjE1"  
-XU_DIEMDANH = 500  # Số xu nhận được khi điểm danh
+XU_DIEMDANH = 5000  # Số xu nhận được khi điểm danh
 THUONG_REF_XU = 5000  # Thưởng mời bạn bè chơi bot
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))  
