@@ -7,7 +7,6 @@ BOT_TOKEN = "8374524579:AAF6CpmmHi0RKYtQ5dJ0bIw9e_wBonjF1nY"
 ADMIN_IDS = [7936179657]  # ID Telegram Admin
 
 import asyncio
-import re
 import enum
 import functools
 import logging
@@ -273,32 +272,29 @@ async def mark_accounts_sold(session, accounts, order_id):
         acc.sold_at = now  
     await session.commit()  
 
-# ── Hàm Import Tự Động Lọc Rác & Ưu Tiên Acc Ngon (Nhiều Skin) ────────────────
+# ── Hàm Import Đã Được Gia Cố Tối Đa ──────────────────────────────────────────
 async def import_accounts(session, lines):
-    stats = {"total": 0, "imported": 0, "duplicates": 0, "invalid": 0, "filtered_junk": 0}
+    stats = {"total": 0, "imported": 0, "duplicates": 0, "invalid": 0}
     
-    # Lấy danh sách username đã tồn tại để tránh trùng
     r_all = await session.execute(select(Account.username))
     existing_unames = set(r_all.scalars().all())
     
-    valid_accounts = []
-
     for raw in lines:
         line = raw.strip()
         if not line:
             continue
         stats["total"] += 1
         
-        # Tách Username và Password ở đầu dòng (Phân cách bởi dấu :)
-        if ":" not in line:
+        if "|" in line:
+            parts = line.split("|", 1)
+        elif ":" in line:
+            parts = line.split(":", 1)
+        else:
             stats["invalid"] += 1
             continue
             
-        parts = line.split(":", 1)
         uname = parts[0].strip()
-        
-        pwd_and_info = parts[1]
-        pwd = pwd_and_info.split("|")[0].strip() if "|" in pwd_and_info else pwd_and_info.strip()
+        pwd = parts[1].strip()
         
         if not uname or not pwd:
             stats["invalid"] += 1
@@ -307,41 +303,230 @@ async def import_accounts(session, lines):
         if uname in existing_unames:
             stats["duplicates"] += 1
             continue
-
-        # Bắt thông số Tướng, Skin, Trạng thái BAN từ file Check
-        tuong_match = re.search(r"Tướng=(\d+)", line)
-        skin_match = re.search(r"Skin=(\d+)", line)
-        ban_match = re.search(r"BAN=(YES|YES_BAN|TRUE)", line, re.IGNORECASE)
-
-        so_tuong = int(tuong_match.group(1)) if tuong_match else 0
-        so_skin = int(skin_match.group(1)) if skin_match else 0
-        is_banned = bool(ban_match)
-
-        # LỌC BỎ ACC RÁC (0 Skin và 0 Tướng, hoặc bị BAN)
-        if is_banned or (so_tuong == 0 and so_skin == 0):
-            stats["filtered_junk"] += 1
-            continue
-
-        # Lưu lại danh sách kèm số lượng Skin để xếp hạng
-        valid_accounts.append({
-            "username": uname,
-            "password": pwd,
-            "skin": so_skin
-        })
-        existing_unames.add(uname)
-
-    # TĂNG TỈ LỆ ACC NGON: Sắp xếp giảm dần theo số lượng Skin
-    valid_accounts.sort(key=lambda x: x["skin"], reverse=True)
-
-    # Lưu vào Database
-    for acc in valid_accounts:
+            
         session.add(
-            Account(username=acc["username"], password=acc["password"], status=AccountStatus.available)
+            Account(username=uname, password=pwd, status=AccountStatus.available)
         )
+        existing_unames.add(uname)
         stats["imported"] += 1
 
     await session.commit()
     return stats
+
+async def get_unsold_accounts(session):
+    r = await session.execute(select(Account).where(Account.status == AccountStatus.available)); return list(r.scalars().all())  
+
+async def get_sold_accounts(session):
+    r = await session.execute(select(Account).where(Account.status == AccountStatus.sold)); return list(r.scalars().all())  
+
+async def delete_account_by_username(session, username):
+    r = await session.execute(select(Account).where(Account.username == username))  
+    acc = r.scalar_one_or_none()  
+    if acc is None: return False
+    await session.delete(acc)  
+    await session.commit()  
+    return True
+
+async def create_order(session, user_id, quantity, price, file_name):
+    order = Order(user_id=user_id, quantity=quantity, price=price, status=OrderStatus.completed, file_name=file_name)  
+    session.add(order)  
+    await session.flush()  
+    return order
+
+async def get_user_orders(session, user_id, limit=20):
+    r = await session.execute(select(Order).where(Order.user_id == user_id).order_by(Order.created_at.desc()).limit(limit))  
+    return list(r.scalars().all())  
+
+async def get_all_orders(session, limit=50):
+    r = await session.execute(select(Order).order_by(Order.created_at.desc()).limit(limit))  
+    return list(r.scalars().all())  
+
+async def create_deposit(session, user_id, amount, bill_image=None):
+    dep = Deposit(user_id=user_id, amount=amount, bill_image=bill_image, status=DepositStatus.pending)  
+    session.add(dep)  
+    await session.commit()  
+    await session.refresh(dep)  
+    return dep
+
+async def get_deposit_by_id(session, deposit_id):
+    r = await session.execute(select(Deposit).options(selectinload(Deposit.user)).where(Deposit.id == deposit_id))  
+    return r.scalar_one_or_none()  
+
+async def approve_deposit(session, deposit_id, admin_tg_id):
+    dep = await get_deposit_by_id(session, deposit_id)  
+    if dep is None or dep.status != DepositStatus.pending: return None  
+    dep.status = DepositStatus.approved  
+    dep.admin_id = admin_tg_id  
+    dep.approved_at = datetime.utcnow()  
+    await session.commit()  
+    await session.refresh(dep)  
+    return dep
+
+async def reject_deposit(session, deposit_id, admin_tg_id):
+    dep = await get_deposit_by_id(session, deposit_id)  
+    if dep is None or dep.status != DepositStatus.pending: return None  
+    dep.status = DepositStatus.rejected  
+    dep.admin_id = admin_tg_id  
+    dep.approved_at = datetime.utcnow()  
+    await session.commit()  
+    await session.refresh(dep)  
+    return dep
+
+async def get_pending_deposits(session):
+    r = await session.execute(select(Deposit).options(selectinload(Deposit.user)).where(Deposit.status == DepositStatus.pending).order_by(Deposit.created_at.asc()))  
+    return list(r.scalars().all())  
+
+# ── File utils ────────────────────────────────────────────────────────────────
+async def save_export_file(lines, prefix):
+    os.makedirs(EXPORTS_DIR, exist_ok=True)  
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")  
+    fp = os.path.join(EXPORTS_DIR, f"{prefix}_{ts}.txt")  
+    async with aiofiles.open(fp, "w", encoding="utf-8") as f:  
+        await f.write("\n".join(lines))  
+    return fp  
+
+async def save_order_file(accounts_data, order_id):
+    os.makedirs(EXPORTS_DIR, exist_ok=True)  
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")  
+    filename = f"order_{order_id}_{ts}.txt"  
+    fp = os.path.join(EXPORTS_DIR, filename)  
+    async with aiofiles.open(fp, "w", encoding="utf-8") as f:  
+        await f.write("\n".join(f"{u}|{p}" for u, p in accounts_data))  
+    return fp, filename  
+
+async def save_bill_image(file_bytes, extension="jpg"):
+    os.makedirs(UPLOADS_DIR, exist_ok=True)  
+    fp = os.path.join(UPLOADS_DIR, f"bill_{uuid.uuid4().hex}.{extension}")  
+    async with aiofiles.open(fp, "wb") as f:  
+        await f.write(file_bytes)  
+    return fp  
+
+async def save_qr_image(file_bytes):
+    os.makedirs(UPLOADS_DIR, exist_ok=True)  
+    async with aiofiles.open(QR_IMAGE_PATH, "wb") as f:  
+        await f.write(file_bytes)  
+    return QR_IMAGE_PATH  
+
+def qr_exists():
+    return os.path.isfile(QR_IMAGE_PATH)  
+
+# ── Keyboards ─────────────────────────────────────────────────────────────────
+def main_menu_kb():
+    b = ReplyKeyboardBuilder()  
+    b.row(KeyboardButton(text="🏠 Trang Chủ"), KeyboardButton(text="🛒 Mua Acc"))  
+    b.row(KeyboardButton(text="💳 Nạp Tiền"), KeyboardButton(text="👤 Tài Khoản"))  
+    b.row(KeyboardButton(text="🎲 Chơi Tài Xỉu"), KeyboardButton(text="🎁 Điểm Danh"))
+    b.row(KeyboardButton(text="🔗 Giới Thiệu"), KeyboardButton(text="🏆 Top Đại Gia"))
+    b.row(KeyboardButton(text="🪙 Đổi Tiền"), KeyboardButton(text="🎁 Nhập Mã"))
+    b.row(KeyboardButton(text="📦 Đơn Hàng"), KeyboardButton(text="☎ Hỗ Trợ"))  
+    b.row(KeyboardButton(text="🟢 Bot Đang Chạy 24/7"))
+    return b.as_markup(resize_keyboard=True)  
+
+def cancel_kb():
+    b = ReplyKeyboardBuilder()  
+    b.row(KeyboardButton(text="❌ Hủy"))  
+    return b.as_markup(resize_keyboard=True)  
+
+def deposit_approval_kb(deposit_id):
+    b = InlineKeyboardBuilder()  
+    b.row(
+        InlineKeyboardButton(text="✅ DUYỆT", callback_data=f"approve_deposit:{deposit_id}"),  
+        InlineKeyboardButton(text="❌ TỪ CHỐI", callback_data=f"reject_deposit:{deposit_id}"),  
+    )
+    return b.as_markup()  
+
+def tai_xiu_inline_kb():
+    b = InlineKeyboardBuilder()
+    b.row(
+        InlineKeyboardButton(text="🔴 Tài  (11–18)", callback_data="tx:tai"),  
+        InlineKeyboardButton(text="🔵 Xỉu  (3–10)",  callback_data="tx:xiu"),  
+    )
+    return b.as_markup()
+
+def admin_menu_kb():
+    b = ReplyKeyboardBuilder()  
+    b.row(KeyboardButton(text="📊 Dashboard"), KeyboardButton(text="📥 Import TXT"))  
+    b.row(KeyboardButton(text="📦 Xem Kho"), KeyboardButton(text="📊 Thống Kê"))  
+    b.row(KeyboardButton(text="💰 Cộng Tiền"), KeyboardButton(text="💸 Trừ Tiền"))  
+    b.row(KeyboardButton(text="🪙 Cộng Xu"), KeyboardButton(text="🪙 Trừ Xu"))
+    b.row(KeyboardButton(text="🎫 Tạo Code"), KeyboardButton(text="🎫 Danh Sách Code"))
+    b.row(KeyboardButton(text="📷 Đổi QR"), KeyboardButton(text="📥 Bill Chờ"))  
+    b.row(KeyboardButton(text="📢 Broadcast"), KeyboardButton(text="🚫 Ban User"))  
+    b.row(KeyboardButton(text="✅ Unban User"), KeyboardButton(text="🗑 Xóa Account"))  
+    b.row(KeyboardButton(text="📤 Export Chưa Bán"), KeyboardButton(text="📤 Export Đã Bán"))  
+    b.row(KeyboardButton(text="🔙 Menu Chính"), KeyboardButton(text="🟢 Bot Đang Chạy 24/7"))  
+    return b.as_markup(resize_keyboard=True)  
+
+# ── Middleware ────────────────────────────────────────────────────────────────
+class AuthMiddleware(BaseMiddleware):  
+    async def __call__(self, handler, event, data):
+        user = data.get("event_from_user")  
+        if user is None: return await handler(event, data)  
+        is_admin = user.id in ADMIN_IDS  
+        fullname = (user.full_name or "").strip() or user.username or str(user.id)  
+        async with AsyncSessionLocal() as session:  
+            db_user = await get_or_create_user(session, user.id, user.username, fullname, is_admin)  
+            if db_user.is_admin != is_admin:
+                db_user.is_admin = is_admin
+                await session.commit()  
+            data["db_user"] = db_user  
+            data["db_session"] = session  
+            data["is_admin"] = is_admin  
+            if db_user.is_banned and not is_admin:  
+                if isinstance(event, Message): await event.answer("🚫 Bạn đã bị cấm sử dụng bot.")  
+                return
+            return await handler(event, data)  
+
+# ── States ────────────────────────────────────────────────────────────────────
+class ShopState(StatesGroup):  
+    waiting_quantity = State()  
+
+class DepositState(StatesGroup):  
+    waiting_amount = State()  
+    waiting_bill = State()  
+
+class TaixiuState(StatesGroup):
+    waiting_bet = State()
+    waiting_exchange_xu = State()
+
+class CodeState(StatesGroup):
+    waiting_code_input = State()
+
+class AdminStates(StatesGroup):  
+    waiting_qr = State()  
+    waiting_import_file = State()  
+    waiting_add_balance_id = State()  
+    waiting_add_balance_amount = State()  
+    waiting_subtract_balance_id = State()  
+    waiting_subtract_balance_amount = State()  
+    waiting_add_xu_id = State()
+    waiting_add_xu_amount = State()
+    waiting_subtract_xu_id = State()
+    waiting_subtract_xu_amount = State()
+    waiting_create_code_name = State()
+    waiting_create_code_xu = State()
+    waiting_create_code_uses = State()
+    waiting_ban_id = State()  
+    waiting_unban_id = State()  
+    waiting_delete_username = State()  
+    waiting_broadcast_text = State()  
+
+def admin_only(func):  
+    @functools.wraps(func)
+    async def wrapper(message: Message, is_admin: bool, *args, **kwargs):
+        if not is_admin:
+            await message.answer("❌ Bạn không có quyền truy cập.")  
+            return
+        return await func(message, is_admin=is_admin, *args, **kwargs)
+    return wrapper  
+
+# ── Router ────────────────────────────────────────────────────────────────────
+router = Router()  
+
+# ── Xử lý nút Bot Đang Chạy ───────────────────────────────────────────────────
+@router.message(lambda m: m.text == "🟢 Bot Đang Chạy 24/7")
+async def bot_status_click(message: Message):
+    await message.answer("⚡ <b>Hệ thống trực tuyến!</b>\nBot vẫn đang vận hành ổn định, xanh chín 24/7 trên máy chủ Render.", parse_mode="HTML")
 
   
 
