@@ -7,6 +7,7 @@ BOT_TOKEN = "8374524579:AAF6CpmmHi0RKYtQ5dJ0bIw9e_wBonjF1nY"
 ADMIN_IDS = [7936179657]  # ID Telegram Admin
 
 import asyncio
+import re
 import enum
 import functools
 import logging
@@ -288,7 +289,7 @@ async def import_accounts(session, lines):
             continue
         stats["total"] += 1
         
-        # 1. Tách Username và Password ở đầu dòng (Phân cách bởi dấu :)
+        # Tách Username và Password ở đầu dòng (Phân cách bởi dấu :)
         if ":" not in line:
             stats["invalid"] += 1
             continue
@@ -296,7 +297,6 @@ async def import_accounts(session, lines):
         parts = line.split(":", 1)
         uname = parts[0].strip()
         
-        # Mật khẩu nằm trước dấu | đầu tiên
         pwd_and_info = parts[1]
         pwd = pwd_and_info.split("|")[0].strip() if "|" in pwd_and_info else pwd_and_info.strip()
         
@@ -308,7 +308,7 @@ async def import_accounts(session, lines):
             stats["duplicates"] += 1
             continue
 
-        # 2. Bắt thông số Tướng, Skin, Trạng thái BAN từ file Check
+        # Bắt thông số Tướng, Skin, Trạng thái BAN từ file Check
         tuong_match = re.search(r"Tướng=(\d+)", line)
         skin_match = re.search(r"Skin=(\d+)", line)
         ban_match = re.search(r"BAN=(YES|YES_BAN|TRUE)", line, re.IGNORECASE)
@@ -317,7 +317,7 @@ async def import_accounts(session, lines):
         so_skin = int(skin_match.group(1)) if skin_match else 0
         is_banned = bool(ban_match)
 
-        # 3. LỌC BỎ ACC RÁC (0 Skin và 0 Tướng, hoặc bị BAN)
+        # LỌC BỎ ACC RÁC (0 Skin và 0 Tướng, hoặc bị BAN)
         if is_banned or (so_tuong == 0 and so_skin == 0):
             stats["filtered_junk"] += 1
             continue
@@ -330,10 +330,10 @@ async def import_accounts(session, lines):
         })
         existing_unames.add(uname)
 
-    # 4. TĂNG TỈ LỆ ACC NGON: Sắp xếp giảm dần theo số lượng Skin
+    # TĂNG TỈ LỆ ACC NGON: Sắp xếp giảm dần theo số lượng Skin
     valid_accounts.sort(key=lambda x: x["skin"], reverse=True)
 
-    # 5. Lưu vào Database
+    # Lưu vào Database
     for acc in valid_accounts:
         session.add(
             Account(username=acc["username"], password=acc["password"], status=AccountStatus.available)
@@ -342,6 +342,7 @@ async def import_accounts(session, lines):
 
     await session.commit()
     return stats
+
   
 
 # ── File utils ────────────────────────────────────────────────────────────────
