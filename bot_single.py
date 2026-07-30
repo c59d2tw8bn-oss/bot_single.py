@@ -272,29 +272,33 @@ async def mark_accounts_sold(session, accounts, order_id):
         acc.sold_at = now  
     await session.commit()  
 
-# ── Hàm Import Đã Được Gia Cố Tối Đa ──────────────────────────────────────────
+# ── Hàm Import Tự Động Lọc Rác & Ưu Tiên Acc Ngon (Nhiều Skin) ────────────────
 async def import_accounts(session, lines):
-    stats = {"total": 0, "imported": 0, "duplicates": 0, "invalid": 0}
+    stats = {"total": 0, "imported": 0, "duplicates": 0, "invalid": 0, "filtered_junk": 0}
     
+    # Lấy danh sách username đã tồn tại để tránh trùng
     r_all = await session.execute(select(Account.username))
     existing_unames = set(r_all.scalars().all())
     
+    valid_accounts = []
+
     for raw in lines:
         line = raw.strip()
         if not line:
             continue
         stats["total"] += 1
         
-        if "|" in line:
-            parts = line.split("|", 1)
-        elif ":" in line:
-            parts = line.split(":", 1)
-        else:
+        # 1. Tách Username và Password ở đầu dòng (Phân cách bởi dấu :)
+        if ":" not in line:
             stats["invalid"] += 1
             continue
             
+        parts = line.split(":", 1)
         uname = parts[0].strip()
-        pwd = parts[1].strip()
+        
+        # Mật khẩu nằm trước dấu | đầu tiên
+        pwd_and_info = parts[1]
+        pwd = pwd_and_info.split("|")[0].strip() if "|" in pwd_and_info else pwd_and_info.strip()
         
         if not uname or not pwd:
             stats["invalid"] += 1
@@ -303,78 +307,42 @@ async def import_accounts(session, lines):
         if uname in existing_unames:
             stats["duplicates"] += 1
             continue
-            
-        session.add(
-            Account(username=uname, password=pwd, status=AccountStatus.available)
-        )
+
+        # 2. Bắt thông số Tướng, Skin, Trạng thái BAN từ file Check
+        tuong_match = re.search(r"Tướng=(\d+)", line)
+        skin_match = re.search(r"Skin=(\d+)", line)
+        ban_match = re.search(r"BAN=(YES|YES_BAN|TRUE)", line, re.IGNORECASE)
+
+        so_tuong = int(tuong_match.group(1)) if tuong_match else 0
+        so_skin = int(skin_match.group(1)) if skin_match else 0
+        is_banned = bool(ban_match)
+
+        # 3. LỌC BỎ ACC RÁC (0 Skin và 0 Tướng, hoặc bị BAN)
+        if is_banned or (so_tuong == 0 and so_skin == 0):
+            stats["filtered_junk"] += 1
+            continue
+
+        # Lưu lại danh sách kèm số lượng Skin để xếp hạng
+        valid_accounts.append({
+            "username": uname,
+            "password": pwd,
+            "skin": so_skin
+        })
         existing_unames.add(uname)
+
+    # 4. TĂNG TỈ LỆ ACC NGON: Sắp xếp giảm dần theo số lượng Skin
+    valid_accounts.sort(key=lambda x: x["skin"], reverse=True)
+
+    # 5. Lưu vào Database
+    for acc in valid_accounts:
+        session.add(
+            Account(username=acc["username"], password=acc["password"], status=AccountStatus.available)
+        )
         stats["imported"] += 1
 
     await session.commit()
     return stats
-
-async def get_unsold_accounts(session):
-    r = await session.execute(select(Account).where(Account.status == AccountStatus.available)); return list(r.scalars().all())  
-
-async def get_sold_accounts(session):
-    r = await session.execute(select(Account).where(Account.status == AccountStatus.sold)); return list(r.scalars().all())  
-
-async def delete_account_by_username(session, username):
-    r = await session.execute(select(Account).where(Account.username == username))  
-    acc = r.scalar_one_or_none()  
-    if acc is None: return False
-    await session.delete(acc)  
-    await session.commit()  
-    return True
-
-async def create_order(session, user_id, quantity, price, file_name):
-    order = Order(user_id=user_id, quantity=quantity, price=price, status=OrderStatus.completed, file_name=file_name)  
-    session.add(order)  
-    await session.flush()  
-    return order
-
-async def get_user_orders(session, user_id, limit=20):
-    r = await session.execute(select(Order).where(Order.user_id == user_id).order_by(Order.created_at.desc()).limit(limit))  
-    return list(r.scalars().all())  
-
-async def get_all_orders(session, limit=50):
-    r = await session.execute(select(Order).order_by(Order.created_at.desc()).limit(limit))  
-    return list(r.scalars().all())  
-
-async def create_deposit(session, user_id, amount, bill_image=None):
-    dep = Deposit(user_id=user_id, amount=amount, bill_image=bill_image, status=DepositStatus.pending)  
-    session.add(dep)  
-    await session.commit()  
-    await session.refresh(dep)  
-    return dep
-
-async def get_deposit_by_id(session, deposit_id):
-    r = await session.execute(select(Deposit).options(selectinload(Deposit.user)).where(Deposit.id == deposit_id))  
-    return r.scalar_one_or_none()  
-
-async def approve_deposit(session, deposit_id, admin_tg_id):
-    dep = await get_deposit_by_id(session, deposit_id)  
-    if dep is None or dep.status != DepositStatus.pending: return None  
-    dep.status = DepositStatus.approved  
-    dep.admin_id = admin_tg_id  
-    dep.approved_at = datetime.utcnow()  
-    await session.commit()  
-    await session.refresh(dep)  
-    return dep
-
-async def reject_deposit(session, deposit_id, admin_tg_id):
-    dep = await get_deposit_by_id(session, deposit_id)  
-    if dep is None or dep.status != DepositStatus.pending: return None  
-    dep.status = DepositStatus.rejected  
-    dep.admin_id = admin_tg_id  
-    dep.approved_at = datetime.utcnow()  
-    await session.commit()  
-    await session.refresh(dep)  
-    return dep
-
-async def get_pending_deposits(session):
-    r = await session.execute(select(Deposit).options(selectinload(Deposit.user)).where(Deposit.status == DepositStatus.pending).order_by(Deposit.created_at.asc()))  
-    return list(r.scalars().all())  
+  
 
 # ── File utils ────────────────────────────────────────────────────────────────
 async def save_export_file(lines, prefix):
