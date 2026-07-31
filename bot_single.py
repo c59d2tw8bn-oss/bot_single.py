@@ -958,7 +958,7 @@ async def cmd_diemdanh(message: Message, db_session, db_user: User):
         rem = timedelta(days=1) - (now - db_user.last_diemdanh)
         h, r = divmod(rem.seconds, 3600)
         m, _ = divmod(r, 60)
-        await message.answer(f"⚠️ Bạn đã nhận quà điểm danh rồi! Hãy quay lại sau <b>{h} giờ {m} phút</b>.", parse_mode="HTML")
+        await message.answer(rf"⚠️ Bạn đã nhận quà điểm danh rồi! Hãy quay lại sau <b>{h} giờ {m} phút</b>.", parse_mode="HTML")
         return
         
     db_user.xu += XU_DIEMDANH
