@@ -53,7 +53,7 @@ from sqlalchemy.orm import (
 )
 
 # ── Cấu hình Token & Admin ────────────────────────────────────────────────────
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8374524579:AAEitp6vePE_wbO51I1AGnqf5EouHRyEwNI")  
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8374524579:AAHrFSwHdkwJFZe1TRDBStiP9tlxHXn_leM")  
 ADMIN_IDS = [7936179657]  # ID Telegram Admin
 
 # ── Cấu hình Shop & Tài Xỉu ───────────────────────────────────────────────────
