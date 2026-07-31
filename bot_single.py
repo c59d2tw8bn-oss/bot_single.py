@@ -3,17 +3,15 @@
 #  Cài thư viện: pip install aiogram==3.13.1 sqlalchemy==2.0.36 aiosqlite==0.20.0 aiofiles==24.1.0 aiohttp
 # ═══════════════════════════════════════════════════════════════
 
-BOT_TOKEN = "8374524579:AAEitp6vePE_wbO51I1AGnqf5EouHRyEwNI"  
-ADMIN_IDS = [7936179657]  # ID Telegram Admin
-
+import os
+import sys
 import asyncio
 import enum
 import functools
 import logging
-import os
-import sys
 import uuid
 import random
+import re as _re
 from datetime import datetime, timedelta
 
 import aiofiles
@@ -53,6 +51,10 @@ from sqlalchemy.orm import (
     relationship,
     selectinload,
 )
+
+# ── Cấu hình Token & Admin ────────────────────────────────────────────────────
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8374524579:AAEitp6vePE_wbO51I1AGnqf5EouHRyEwNI")  
+ADMIN_IDS = [7936179657]  # ID Telegram Admin
 
 # ── Cấu hình Shop & Tài Xỉu ───────────────────────────────────────────────────
 ACCOUNT_PRICE = 300  # VNĐ mỗi acc
@@ -131,7 +133,6 @@ class User(Base):
     deposits: Mapped[list["Deposit"]] = relationship("Deposit", back_populates="user")  
 
 class Account(Base):  
-    # Đổi sang v4 và chuyển kiểu dữ liệu username/password sang Text để nuốt trọn chuỗi dài không lo lỗi quá ký tự
     __tablename__ = "accounts_v4"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)  
     username: Mapped[str] = mapped_column(Text, unique=True, nullable=False, index=True)  
@@ -140,8 +141,8 @@ class Account(Base):
     order_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("orders.id"), nullable=True)  
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())  
     sold_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  
-    skin_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)   # Số skin (từ checker)
-    tuong_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # Số tướng (từ checker)
+    skin_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)   
+    tuong_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  
     order: Mapped["Order|None"] = relationship("Order", back_populates="accounts")  
 
 class Order(Base):  
@@ -180,7 +181,6 @@ class Giftcode(Base):
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        # Migration: thêm cột skin_count / tuong_count nếu chưa có (an toàn cho DB cũ)
         for col in ("skin_count", "tuong_count"):
             try:
                 await conn.execute(
@@ -189,7 +189,7 @@ async def init_db() -> None:
                     )
                 )
             except Exception:
-                pass  # Một số driver báo lỗi nếu cột đã tồn tại – bỏ qua
+                pass  
     logger.info("Database initialized")  
 
 # ── Services ──────────────────────────────────────────────────────────────────
@@ -264,7 +264,6 @@ async def get_all_users(session):
     r = await session.execute(select(User)); return list(r.scalars().all())  
 
 async def get_available_count(session):
-    # Chỉ đếm acc có thể bán được (có skin hoặc tướng > 0)
     r = await session.execute(
         select(func.count()).where(
             Account.status == AccountStatus.available,
@@ -274,7 +273,6 @@ async def get_available_count(session):
     return r.scalar_one()
 
 async def get_trash_count(session):
-    # Đếm acc trắng chưa bán (0 skin + 0 tướng)
     r = await session.execute(
         select(func.count()).where(
             Account.status == AccountStatus.available,
@@ -285,7 +283,6 @@ async def get_trash_count(session):
     return r.scalar_one()
 
 async def delete_trash_accounts(session):
-    # Xóa toàn bộ acc trắng chưa bán
     r = await session.execute(
         select(Account).where(
             Account.status == AccountStatus.available,
@@ -306,13 +303,12 @@ async def get_total_count(session):
     r = await session.execute(select(func.count()).select_from(Account)); return r.scalar_one()  
 
 async def pick_random_accounts(session, quantity):
-    # Chỉ lấy acc ngon (có skin hoặc tướng > 0), ưu tiên acc nhiều skin + tướng nhất
     pool_size = max(quantity * 5, 200)
     r = await session.execute(
         select(Account)
         .where(
             Account.status == AccountStatus.available,
-            (Account.skin_count + Account.tuong_count) > 0  # Loại acc trắng
+            (Account.skin_count + Account.tuong_count) > 0
         )
         .with_for_update()
         .order_by((Account.skin_count + Account.tuong_count).desc())
@@ -321,7 +317,6 @@ async def pick_random_accounts(session, quantity):
     pool = list(r.scalars().all())
     if len(pool) <= quantity:
         return pool
-    # Weighted-random: acc có nhiều skin + tướng hơn thì xác suất được chọn cao hơn
     weights = [(a.skin_count + a.tuong_count + 1) for a in pool]
     chosen = []
     chosen_ids = set()
@@ -349,40 +344,19 @@ async def mark_accounts_sold(session, accounts, order_id):
     await session.commit()  
 
 # ── Hàm Import Đã Được Gia Cố Tối Đa ──────────────────────────────────────────
-import re as _re
-
 def _parse_checker_line(line: str):
-    """
-    Hỗ trợ nhiều format checker:
-
-    Format 1 (FINAL/checker mới):
-      FINAL = username:password | Name: ... | Tướng: 105 | Skin: 258 | Ban: No | ...
-
-    Format 2 (checker cũ UID):
-      username:password|UID=...|...|Skin=222|Tướng=95|BAN=NO|...
-
-    Format đơn giản:
-      username:password  hoặc  username|password
-
-    Trả về (username, password, skin_count, tuong_count, is_banned)
-    hoặc None nếu không parse được.
-    """
-    # Bỏ prefix "FINAL = " hoặc "FINAL=" nếu có
     stripped = line.strip()
     if stripped.upper().startswith("FINAL"):
         eq = stripped.find("=")
         if eq != -1:
             stripped = stripped[eq + 1:].strip()
 
-    # ── Tách phần credential ra khỏi phần info ────────────────────────────────
     info_part = ""
 
-    # Format 2: có "|UID="
     uid_sep = stripped.find("|UID=")
     if uid_sep != -1:
         cred_part = stripped[:uid_sep].strip()
         info_part = stripped[uid_sep:]
-    # Format 1: có " | Name:" hoặc " | " (FINAL format, dùng dấu cách quanh |)
     elif " | " in stripped:
         first_pipe = stripped.find(" | ")
         cred_part = stripped[:first_pipe].strip()
@@ -390,7 +364,6 @@ def _parse_checker_line(line: str):
     else:
         cred_part = stripped
 
-    # ── Parse username:password ───────────────────────────────────────────────
     if ":" in cred_part:
         uname, pwd = cred_part.split(":", 1)
     elif "|" in cred_part:
@@ -403,16 +376,13 @@ def _parse_checker_line(line: str):
     if not uname or not pwd:
         return None
 
-    # ── Parse Skin, Tướng, Ban từ phần info ──────────────────────────────────
     skin_count = 0
     tuong_count = 0
     is_banned = False
 
     if info_part:
-        # Format 1: "| Skin: 258 |"  hoặc  Format 2: "| Skin=258 |"
         m_skin = _re.search(r"[|\s]Skin\s*[=:]\s*(\d+)", info_part)
         m_tuong = _re.search(r"[|\s]Tướng\s*[=:]\s*(\d+)", info_part)
-        # Format 1: "| Ban: No"  hoặc  Format 2: "| BAN=YES"
         m_ban = _re.search(r"[|\s]Ban\s*[=:]\s*(Yes|No|YES|NO)", info_part, _re.IGNORECASE)
         if m_skin:
             skin_count = int(m_skin.group(1))
@@ -430,8 +400,8 @@ async def import_accounts(session, lines):
         "imported": 0,
         "duplicates": 0,
         "invalid": 0,
-        "filtered_banned": 0,   # Bị ban → loại
-        "filtered_empty": 0,    # 0 skin + 0 tướng → loại
+        "filtered_banned": 0,
+        "filtered_empty": 0,
     }
 
     r_all = await session.execute(select(Account.username))
@@ -450,14 +420,12 @@ async def import_accounts(session, lines):
 
         uname, pwd, skin_count, tuong_count, is_banned = parsed
 
-        # ── Lọc acc rác ───────────────────────────────────────────────────────
         if is_banned:
             stats["filtered_banned"] += 1
             continue
         if skin_count == 0 and tuong_count == 0:
             stats["filtered_empty"] += 1
             continue
-        # ─────────────────────────────────────────────────────────────────────
 
         if uname in existing_unames:
             stats["duplicates"] += 1
@@ -967,7 +935,7 @@ async def cb_reject_deposit(callback: CallbackQuery, bot: Bot, is_admin: bool, d
     await callback.message.edit_reply_markup(reply_markup=None)  
     await callback.message.reply(f"❌ Đã từ chối đơn nạp #{deposit_id}", parse_mode="HTML")  
     if user_tg_id:
-        try: await bot.send_message(user_tg_id, f"❌ <b>Đơn nạp tiền bị từ chối!</b>\n\n💵 Số tiền: <b>{deposit.amount:,} VNĐ</b>\Vui lòng kiểm tra lại hình ảnh hóa đơn.", parse_mode="HTML")  
+        try: await bot.send_message(user_tg_id, f"❌ <b>Đơn nạp tiền bị từ chối!</b>\n\n💵 Số tiền: <b>{deposit.amount:,} VNĐ</b>\n\nVui lòng kiểm tra lại hình ảnh hóa đơn.", parse_mode="HTML")  
         except Exception: pass
     await callback.answer("❌ Đã từ chối!")  
 
@@ -1612,7 +1580,7 @@ async def start_web_server():
     app.router.add_get("/", handle_web)  
     runner = web.AppRunner(app)  
     await runner.setup()  
-    port = int(os.environ.get("BOT_PORT", 8000))  
+    port = int(os.environ.get("PORT", 8000))  
     site = web.TCPSite(runner, "0.0.0.0", port)  
     await site.start()  
     logger.info(f"✅ Web Server Keep-Alive đang kích hoạt tại Port: {port}")
@@ -1633,4 +1601,4 @@ async def main():
     finally: await bot.session.close()  
 
 if __name__ == "__main__":
-    asyncio.run(main())  
+    asyncio.run(main())
